@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "start": "node server/index.js",
     "dev": "concurrently -n web,api \"vite\" \"node server/index.js\"",
     "server": "node server/index.js",
     "build": "tsc && vite build",
