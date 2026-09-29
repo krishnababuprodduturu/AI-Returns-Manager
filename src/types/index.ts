@@ -1,7 +1,11 @@
 export type Status = 'PASS' | 'FAIL' | 'UNCERTAIN'
 export type Disposition = 'RESTOCK' | 'REFURBISH' | 'LIQUIDATE' | 'DISPOSE' | 'UNCERTAIN'
 export type ReturnState = 'Pending' | 'Processing' | 'Completed' | 'Manual Review'
-export interface Evidence { text: string; imageId: string; source: string }
+export type FindingType = 'identity' | 'completeness' | 'condition' | 'disposition'
+export interface Evidence {
+  text: string; imageId: string; source: string; findingType?: FindingType; finding?: string; evidenceText?: string; confidence?: number
+}
+export interface InspectionEvidence { findingType: FindingType; finding: string; evidenceText: string; imageId: string; confidence: number }
 export interface Product { sku: string; name: string; category: string; components: string[] }
 export interface ConditionDefinition { label: string; description: string }
 export interface InspectionResult {
@@ -10,6 +14,8 @@ export interface InspectionResult {
   condition: { label: string; confidence: number; reason: string; evidence: Evidence[] }
   disposition: { recommendation: Disposition; confidence: number; reason: string }
   timestamp: string
+  overallConfidence?: number
+  evidence?: InspectionEvidence[]
 }
 export interface ReturnRecord {
   id: string; return_number: string; orderId: string; sku: string; product: string; received: string; state: ReturnState;

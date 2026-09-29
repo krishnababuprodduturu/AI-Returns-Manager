@@ -196,9 +196,37 @@ export async function uploadReturnImage(returnUuid: string, file: File, category
   return { id: text(image.id), returnId: returnUuid, imageUrl: path, imageCategory: category, fileName: file.name, signedUrl: signed.signedUrl }
 }
 
-export async function runAIInspection(_returnId: string, _images: UploadedReturnImage[]): Promise<InspectionResult> {
+export async function runAIInspection(
+  returnUuid: string,
+  images: UploadedReturnImage[],
+  context: { returnNumber: string; orderNumber: string; expectedProduct: Product; conditionDefinitions: ConditionDefinition[] }
+): Promise<InspectionResult> {
   if (!API_URL) throw new Error('VITE_API_URL is not configured for the Render backend.')
-  throw new Error(`Render at ${API_URL} has no AI image-inspection endpoint in the current server/index.js. No request was sent; implement an image-analysis route before enabling live AI inspections.`)
+  let response: Response
+  try {
+    response = await fetch(`${API_URL}/api/inspect`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        returnInformation: { id: returnUuid, returnNumber: context.returnNumber, orderNumber: context.orderNumber },
+        expectedProduct: { sku: context.expectedProduct.sku, name: context.expectedProduct.name, category: context.expectedProduct.category },
+        expectedComponents: context.expectedProduct.components.map(name => ({ name, required: true })),
+        conditionDefinitions: context.conditionDefinitions,
+        orderInformation: { orderNumber: context.orderNumber, productSku: context.expectedProduct.sku },
+        businessRules: [],
+        images: images.map(image => ({
+          imageId: image.id, imageUrl: image.signedUrl, imageCategory: image.imageCategory, fileName: image.fileName
+        }))
+      })
+    })
+  } catch {
+    throw new Error('Could not reach the Render AI backend. Check VITE_API_URL and the Render service.')
+  }
+  const result = await response.json().catch(() => null)
+  if (!response.ok) throw new Error(result?.error ?? `AI inspection failed (${response.status})`)
+  if (!result?.identity || !result?.completeness || !result?.condition || !result?.disposition) {
+    throw new Error('Render returned an unsupported inspection response.')
+  }
+  return { ...result, timestamp: result.timestamp ?? new Date().toISOString() } as InspectionResult
 }
 
 export function getDemoInspectionResult(scenario: ScenarioKey): InspectionResult {
@@ -207,7 +235,7 @@ export function getDemoInspectionResult(scenario: ScenarioKey): InspectionResult
 
 export async function saveInspection(returnUuid: string, result: InspectionResult): Promise<string> {
   const client = requireSupabase()
-  const overallConfidence = (result.identity.confidence + result.completeness.confidence + result.condition.confidence + result.disposition.confidence) / 4
+  const overallConfidence = result.overallConfidence ?? (result.identity.confidence + result.completeness.confidence + result.condition.confidence + result.disposition.confidence) / 4
   const { data: inspection, error } = await client.from('inspections').insert({
     return_id: returnUuid, identity_status: result.identity.status, identity_confidence: result.identity.confidence,
     completeness_status: result.completeness.status, completeness_confidence: result.completeness.confidence,
@@ -228,14 +256,24 @@ export async function saveInspection(returnUuid: string, result: InspectionResul
 
 export async function saveEvidence(inspectionId: string, result: InspectionResult, images: UploadedReturnImage[]): Promise<void> {
   const client = requireSupabase()
-  const evidenceRows = (['identity', 'completeness', 'condition'] as const).flatMap(findingType =>
-    result[findingType].evidence.map(item => {
+  const evidenceRows = result.evidence
+    ? result.evidence.map(item => {
       const image = images.find(candidate => candidate.localId === item.imageId || candidate.id === item.imageId)
       return {
-        inspection_id: inspectionId, finding_type: findingType, finding: result[findingType].reason,
-        evidence_text: item.text, image_id: image?.id || null, confidence: result[findingType].confidence
+        inspection_id: inspectionId, finding_type: item.findingType, finding: item.finding,
+        evidence_text: item.evidenceText, image_id: image?.id || null, confidence: item.confidence
       }
-    }))
+    })
+    : (['identity', 'completeness', 'condition'] as const).flatMap(findingType =>
+      result[findingType].evidence.map(item => {
+        const image = images.find(candidate => candidate.localId === item.imageId || candidate.id === item.imageId)
+        return {
+          inspection_id: inspectionId, finding_type: item.findingType ?? findingType,
+          finding: item.finding ?? result[findingType].reason,
+          evidence_text: item.evidenceText ?? item.text, image_id: image?.id || null,
+          confidence: item.confidence ?? result[findingType].confidence
+        }
+      }))
   if (evidenceRows.length) {
     const { error: evidenceError } = await client.from('inspection_evidence').insert(evidenceRows)
     fail('Could not save inspection evidence', evidenceError)

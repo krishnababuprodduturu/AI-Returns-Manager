@@ -4,6 +4,7 @@ import cors from 'cors'
 import fs from 'fs'
 import Database from 'better-sqlite3'
 import nodemailer from 'nodemailer'
+import { handleAIInspection } from './ai-inspection.js'
 
 fs.mkdirSync('server/data', { recursive: true })
 const db = new Database('server/data/returns.db') // permanent: stored on disk, survives restarts
@@ -18,16 +19,26 @@ create table if not exists tickets(id integer primary key autoincrement, name te
 
 if (db.prepare('select count(*) c from products').get().c === 0) {
   const ins = db.prepare('insert into products values (?,?,?,?)')
-  ins.run('WH-1000XM5', 'Sony WH-1000XM5 Wireless Headphones', 'Audio', JSON.stringify(['Headphones','Carrying Case','USB Cable','Audio Cable','User Manual']))
-  ins.run('WH-1000XM4', 'Sony WH-1000XM4 Wireless Headphones', 'Audio', JSON.stringify(['Headphones','Carrying Case','USB Cable','Audio Cable','User Manual']))
-  ins.run('KB-MX-KEYS', 'Logitech MX Keys Keyboard', 'Peripherals', JSON.stringify(['Keyboard','USB Receiver','USB Cable','User Manual']))
+  ins.run('WH-1000XM5', 'Sony WH-1000XM5 Wireless Headphones', 'Audio', JSON.stringify(['Headphones', 'Carrying Case', 'USB Cable', 'Audio Cable', 'User Manual']))
+  ins.run('WH-1000XM4', 'Sony WH-1000XM4 Wireless Headphones', 'Audio', JSON.stringify(['Headphones', 'Carrying Case', 'USB Cable', 'Audio Cable', 'User Manual']))
+  ins.run('KB-MX-KEYS', 'Logitech MX Keys Keyboard', 'Peripherals', JSON.stringify(['Keyboard', 'USB Receiver', 'USB Cable', 'User Manual']))
 }
 const upsertReturn = db.prepare(`insert into returns values (@id,@orderId,@sku,@product,@received,@state,@identity,@completeness,@condition,@disposition,@confidence)
   on conflict(id) do update set state=@state, identity=@identity, completeness=@completeness, "condition"=@condition, disposition=@disposition, confidence=@confidence`)
 
 const app = express()
-app.use(cors()); app.use(express.json({ limit: '1mb' }))
+const allowedOrigins = new Set(['https://ai-returns-manager.vercel.app', 'http://localhost:5173'])
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.has(origin)) return callback(null, true)
+    return callback(new Error('This origin is not allowed by the API CORS policy.'))
+  }
+}))
+app.use(express.json({ limit: '15mb' }))
 const bad = (res, msg, code = 400) => res.status(code).json({ error: msg })
+
+app.get('/health', (_req, res) => res.json({ status: 'ok' }))
+app.post('/api/inspect', handleAIInspection)
 
 app.get('/api/products', (_q, res) => res.json(db.prepare('select * from products').all().map(p => ({ ...p, components: JSON.parse(p.components) }))))
 app.post('/api/products', (req, res) => {
@@ -58,10 +69,12 @@ app.post('/api/inspections', (req, res) => {
   const p = db.prepare('select name from products where sku=?').get(sku ?? prev?.sku)
   if (result) {
     const c = result
-    upsertReturn.run({ id: returnId, orderId: prev?.orderId ?? 'N/A', sku: sku ?? prev?.sku ?? 'N/A', product: p?.name ?? prev?.product ?? 'Unknown', received: prev?.received ?? reviewedAt,
+    upsertReturn.run({
+      id: returnId, orderId: prev?.orderId ?? 'N/A', sku: sku ?? prev?.sku ?? 'N/A', product: p?.name ?? prev?.product ?? 'Unknown', received: prev?.received ?? reviewedAt,
       state: action === 'MANUAL_REVIEW' ? 'Manual Review' : 'Completed', identity: c.identity.status, completeness: c.completeness.status, condition: c.condition.label,
       disposition: disposition ?? c.disposition.recommendation,
-      confidence: (c.identity.confidence + c.completeness.confidence + c.condition.confidence + c.disposition.confidence) / 4 })
+      confidence: (c.identity.confidence + c.completeness.confidence + c.condition.confidence + c.disposition.confidence) / 4
+    })
   }
   res.status(201).json({ returnId, action, disposition, operator, reviewedAt })
 })

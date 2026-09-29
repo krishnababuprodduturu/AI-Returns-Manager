@@ -40,10 +40,14 @@ export default function NewInspection() {
       if (demoMode) {
         setRes(getDemoInspectionResult(scenario))
       } else {
+        if (!product) throw new Error('Select a product from the catalogue before starting an inspection.')
+        if (defs.length === 0) throw new Error('Official condition definitions are required before starting an inspection.')
         const returnRecord = await createReturn({ returnNumber: ret, orderId: order, sku: sel })
         setReturnUuid(returnRecord.id)
         const uploaded = await Promise.all(imgs.map(async image => ({ ...(await uploadReturnImage(returnRecord.id, image.file, image.cat)), localId: image.id })))
-        const result = await runAIInspection(returnRecord.id, uploaded)
+        const result = await runAIInspection(returnRecord.id, uploaded, {
+          returnNumber: ret, orderNumber: order, expectedProduct: product, conditionDefinitions: defs
+        })
         if (result.condition.label !== 'UNCERTAIN' && !defs.some(definition => definition.label === result.condition.label)) {
           throw new Error(defs.length ? `Condition label "${result.condition.label}" is not in Supabase condition_definitions.` : 'No condition definitions exist in Supabase, so a real condition result cannot be validated.')
         }
