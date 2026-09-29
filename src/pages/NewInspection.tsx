@@ -17,6 +17,7 @@ function EvidenceList({ items, onPick }: { items: Evidence[]; onPick: (e: Eviden
 export default function NewInspection() {
   const [step, setStep] = useState(0); const [products, setProducts] = useState<Product[]>([]); const [defs, setDefs] = useState<ConditionDefinition[]>([])
   const [sel, setSel] = useState(''); const [ret, setRet] = useState('RET-2001'); const [order, setOrder] = useState('ORD-9001')
+  const [returnUuid, setReturnUuid] = useState('')
   const [imgs, setImgs] = useState<Img[]>([]); const [err, setErr] = useState(''); const [stage, setStage] = useState(0)
   const [res, setRes] = useState<InspectionResult | null>(null); const [inspectionId, setInspectionId] = useState(''); const [isDemo, setIsDemo] = useState(false)
   const [focus, setFocus] = useState<Evidence | null>(null); const [decision, setDecision] = useState(''); const [ovr, setOvr] = useState({ d: 'RESTOCK', r: '', n: '' })
@@ -33,19 +34,20 @@ export default function NewInspection() {
   }
   const run = async (scenario?: ScenarioKey) => {
     const demoMode = scenario !== undefined
-    setStep(2); setRes(null); setErr(''); setStage(0); setDecision(''); setInspectionId(''); setIsDemo(demoMode)
+    setStep(2); setRes(null); setErr(''); setStage(0); setDecision(''); setInspectionId(''); setReturnUuid(''); setIsDemo(demoMode)
     const t = setInterval(() => setStage(x => Math.min(x + 1, stages.length - 1)), 400)
     try {
       if (demoMode) {
         setRes(getDemoInspectionResult(scenario))
       } else {
-        await createReturn({ id: ret, orderId: order, sku: sel })
-        const uploaded = await Promise.all(imgs.map(async image => ({ ...(await uploadReturnImage(ret, image.file, image.cat)), localId: image.id })))
-        const result = await runAIInspection(ret, uploaded)
+        const returnRecord = await createReturn({ returnNumber: ret, orderId: order, sku: sel })
+        setReturnUuid(returnRecord.id)
+        const uploaded = await Promise.all(imgs.map(async image => ({ ...(await uploadReturnImage(returnRecord.id, image.file, image.cat)), localId: image.id })))
+        const result = await runAIInspection(returnRecord.id, uploaded)
         if (result.condition.label !== 'UNCERTAIN' && !defs.some(definition => definition.label === result.condition.label)) {
           throw new Error(defs.length ? `Condition label "${result.condition.label}" is not in Supabase condition_definitions.` : 'No condition definitions exist in Supabase, so a real condition result cannot be validated.')
         }
-        const savedInspectionId = await saveInspection(ret, result)
+        const savedInspectionId = await saveInspection(returnRecord.id, result)
         await saveEvidence(savedInspectionId, result, uploaded)
         setInspectionId(savedInspectionId)
         setRes(result)
@@ -59,7 +61,8 @@ export default function NewInspection() {
     if (isDemo) { setErr('DEMO/MOCK result only. Operator reviews are not saved.'); return }
     try {
       if (!inspectionId) throw new Error('No saved inspection is available to review.')
-      const r = await submitInspection({ returnId: ret, inspectionId, action: a, disposition: a === 'OVERRIDE' ? ovr.d : res?.disposition.recommendation, reason: ovr.r, notes: ovr.n })
+      if (!returnUuid) throw new Error('The return UUID is missing; reload the return before submitting a review.')
+      const r = await submitInspection({ returnId: returnUuid, inspectionId, action: a, disposition: a === 'OVERRIDE' ? ovr.d : res?.disposition.recommendation, reason: ovr.r, notes: ovr.n })
       setErr(''); setDecision(a); setAudit(`${r.operator}, ${new Date(r.reviewedAt).toLocaleString()}`)
     } catch (e) { setErr((e as Error).message) }
   }

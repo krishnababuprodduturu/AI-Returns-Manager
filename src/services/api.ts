@@ -32,7 +32,8 @@ function makeReturn(row: Row, products: Row[], orders: Row[], latestInspection?:
   const product = products.find(item => productKey(item) === key || text(item.sku, item.product_sku) === key)
   const stateValue = latestAction?.action === 'MANUAL_REVIEW' ? 'Manual Review' : row.state ?? row.status ?? (latestInspection ? 'Completed' : 'Pending')
   return {
-    id: text(row.id, row.return_id), orderId: text(order?.order_number, order?.order_id, row.order_number, row.order_id, row.orderId),
+    id: text(row.id), return_number: text(row.return_number, row.return_id),
+    orderId: text(order?.order_number, order?.order_id, row.order_number, row.order_id, row.orderId),
     sku: text(product?.sku, product?.product_sku, row.sku, row.product_sku, order?.sku),
     product: text(product?.name, product?.product_name, row.product, row.product_name, 'Unknown product'),
     received: text(row.received_at, row.received, row.created_at), state: status(stateValue),
@@ -90,8 +91,8 @@ export async function getReturns(): Promise<ReturnRecord[]> {
   const inspections = inspectionsResult.data ?? []
   const audits = auditResult.data ?? []
   return (returnsResult.data ?? []).map((row: Row) => {
-    const returnId = text(row.id, row.return_id)
-    const latestInspection = inspections.filter((item: Row) => text(item.return_id) === returnId)
+    const returnUuid = text(row.id)
+    const latestInspection = inspections.filter((item: Row) => text(item.return_id) === returnUuid)
       .sort((a: Row, b: Row) => text(b.created_at).localeCompare(text(a.created_at)))[0]
     const latestAction = audits.filter((item: Row) => text(item.inspection_id) === text(latestInspection?.id, latestInspection?.inspection_id))
       .sort((a: Row, b: Row) => text(b.created_at).localeCompare(text(a.created_at)))[0]
@@ -99,15 +100,18 @@ export async function getReturns(): Promise<ReturnRecord[]> {
   }).sort((a: ReturnRecord, b: ReturnRecord) => b.received.localeCompare(a.received))
 }
 
-export async function getReturnById(id: string): Promise<ReturnDetail> {
+export async function getReturnById(identifier: string): Promise<ReturnDetail> {
   const client = requireSupabase()
-  const { data: row, error } = await client.from('returns').select('*').eq('id', id).maybeSingle()
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(identifier)
+  const returnQuery = client.from('returns').select('*')
+  const { data: row, error } = await (isUuid ? returnQuery.eq('id', identifier) : returnQuery.eq('return_number', identifier)).maybeSingle()
   fail('Could not load return', error)
-  if (!row) throw new Error(`Return ${id} was not found.`)
+  if (!row) throw new Error(`Return ${identifier} was not found.`)
+  const returnUuid = text(row.id)
   const [productsResult, ordersResult, imagesResult, inspectionsResult] = await Promise.all([
     client.from('products').select('*'), client.from('orders').select('*'),
-    client.from('return_images').select('*').eq('return_id', id),
-    client.from('inspections').select('*').eq('return_id', id)
+    client.from('return_images').select('*').eq('return_id', returnUuid),
+    client.from('inspections').select('*').eq('return_id', returnUuid)
   ])
   fail('Could not load return product', productsResult.error)
   fail('Could not load return order', ordersResult.error)
@@ -122,7 +126,7 @@ export async function getReturnById(id: string): Promise<ReturnDetail> {
     const { data, error: signedError } = await client.storage.from('return-images').createSignedUrl(path, 3600)
     fail(`Could not create a signed URL for ${text(image.file_name, 'return image')}`, signedError)
     if (!data) throw new Error(`Could not create a signed URL for ${text(image.file_name, 'return image')}.`)
-    return { id: text(image.id), returnId: id, imageUrl: path, imageCategory: text(image.image_category), fileName: text(image.file_name), signedUrl: data.signedUrl }
+    return { id: text(image.id), returnId: returnUuid, imageUrl: path, imageCategory: text(image.image_category), fileName: text(image.file_name), signedUrl: data.signedUrl }
   }))
   let inspection: ReturnDetail['inspection'] = null
   if (latestInspection) {
@@ -138,23 +142,25 @@ export async function getReturnById(id: string): Promise<ReturnDetail> {
   return { ...makeReturn(row, productsResult.data ?? [], ordersResult.data ?? [], latestInspection), product: text(product?.name, product?.product_name, row.product_name, 'Unknown product'), images, inspection }
 }
 
-export async function createReturn(input: { id: string; orderId: string; sku: string }): Promise<ReturnRecord> {
+export async function createReturn(input: { returnNumber: string; orderId: string; sku: string }): Promise<ReturnRecord> {
   const client = requireSupabase()
-  const { data: existing, error: existingError } = await client.from('returns').select('*').eq('id', input.id).maybeSingle()
+  const { data: existing, error: existingError } = await client.from('returns').select('*').eq('return_number', input.returnNumber).maybeSingle()
   fail('Could not check for an existing return', existingError)
+  if (existing) {
+    return { ...makeReturn(existing, [], []), orderId: input.orderId, sku: input.sku }
+  }
   const [productsResult, ordersResult] = await Promise.all([client.from('products').select('*'), client.from('orders').select('*')])
   fail('Could not look up product catalogue', productsResult.error)
   fail('Could not look up orders', ordersResult.error)
   const product = (productsResult.data ?? []).find((item: Row) => text(item.sku, item.product_sku) === input.sku)
   if (!product) throw new Error(`Product ${input.sku} was not found in the Supabase catalogue.`)
-  if (existing) return makeReturn(existing, productsResult.data ?? [], ordersResult.data ?? [])
   const order = (ordersResult.data ?? []).find((item: Row) => [item.order_number, item.order_id, item.id].some(value => text(value) === input.orderId))
   if (!order) throw new Error(`Order ${input.orderId} was not found in Supabase.`)
   const orderProductId = text(order.product_id, order.product_sku, order.sku)
   if (orderProductId && orderProductId !== productKey(product) && orderProductId !== input.sku) {
     throw new Error(`Product ${input.sku} does not match order ${input.orderId}.`)
   }
-  const { data, error } = await client.from('returns').insert({ id: input.id, order_id: text(order.id, order.order_id) }).select('*').single()
+  const { data, error } = await client.from('returns').insert({ return_number: input.returnNumber, order_id: text(order.id) }).select('*').single()
   fail('Could not create return in Supabase', error)
   return makeReturn(data, productsResult.data ?? [], ordersResult.data ?? [])
 }
@@ -171,14 +177,14 @@ export async function getConditionDefinitions(): Promise<ConditionDefinition[]> 
 }
 
 export interface UploadedReturnImage extends ReturnImage { signedUrl: string; localId?: string }
-export async function uploadReturnImage(returnId: string, file: File, category = 'Other'): Promise<UploadedReturnImage> {
+export async function uploadReturnImage(returnUuid: string, file: File, category = 'Other'): Promise<UploadedReturnImage> {
   const client = requireSupabase()
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_') || 'image'
-  const path = `returns/${returnId}/${crypto.randomUUID()}-${safeName}`
+  const path = `returns/${returnUuid}/${crypto.randomUUID()}-${safeName}`
   const { error: uploadError } = await client.storage.from('return-images').upload(path, file, { contentType: file.type, upsert: false })
   fail(`Image upload failed for ${file.name}`, uploadError)
   const { data: image, error: insertError } = await client.from('return_images').insert({
-    return_id: returnId, image_url: path, image_category: category, file_name: file.name
+    return_id: returnUuid, image_url: path, image_category: category, file_name: file.name
   }).select('*').single()
   if (insertError) {
     await client.storage.from('return-images').remove([path])
@@ -187,7 +193,7 @@ export async function uploadReturnImage(returnId: string, file: File, category =
   const { data: signed, error: signedError } = await client.storage.from('return-images').createSignedUrl(path, 3600)
   fail(`Storage signed URL failed for ${file.name}`, signedError)
   if (!signed) throw new Error(`Storage did not return a signed URL for ${file.name}.`)
-  return { id: text(image.id), returnId, imageUrl: path, imageCategory: category, fileName: file.name, signedUrl: signed.signedUrl }
+  return { id: text(image.id), returnId: returnUuid, imageUrl: path, imageCategory: category, fileName: file.name, signedUrl: signed.signedUrl }
 }
 
 export async function runAIInspection(_returnId: string, _images: UploadedReturnImage[]): Promise<InspectionResult> {
@@ -199,11 +205,11 @@ export function getDemoInspectionResult(scenario: ScenarioKey): InspectionResult
   return { ...scenarios[scenario].result, timestamp: new Date().toISOString() }
 }
 
-export async function saveInspection(returnId: string, result: InspectionResult): Promise<string> {
+export async function saveInspection(returnUuid: string, result: InspectionResult): Promise<string> {
   const client = requireSupabase()
   const overallConfidence = (result.identity.confidence + result.completeness.confidence + result.condition.confidence + result.disposition.confidence) / 4
   const { data: inspection, error } = await client.from('inspections').insert({
-    return_id: returnId, identity_status: result.identity.status, identity_confidence: result.identity.confidence,
+    return_id: returnUuid, identity_status: result.identity.status, identity_confidence: result.identity.confidence,
     completeness_status: result.completeness.status, completeness_confidence: result.completeness.confidence,
     condition_label: result.condition.label, condition_confidence: result.condition.confidence,
     disposition: result.disposition.recommendation, disposition_confidence: result.disposition.confidence,

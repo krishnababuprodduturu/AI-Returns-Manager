@@ -12,7 +12,7 @@ export interface InspectionResult {
   timestamp: string
 }
 export interface ReturnRecord {
-  id: string; orderId: string; sku: string; product: string; received: string; state: ReturnState;
+  id: string; return_number: string; orderId: string; sku: string; product: string; received: string; state: ReturnState;
   identity: Status; completeness: Status; condition: string; disposition: Disposition; confidence: number
 }
 export interface ReturnImage { id: string; returnId: string; imageUrl: string; imageCategory: string; fileName: string }

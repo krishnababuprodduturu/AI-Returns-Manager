@@ -59,6 +59,6 @@ const ids: [string, string, ReturnRecord['state'], ReturnRecord['identity'], Ret
   ['RET-1047', 'ORD-8879', 'Processing', 'UNCERTAIN', 'UNCERTAIN', 'UNCERTAIN', 'UNCERTAIN', 0], ['RET-1048', 'ORD-8890', 'Completed', 'PASS', 'PASS', 'Used - Fair', 'LIQUIDATE', .86]]
 export const returns: ReturnRecord[] = ids.map((r, i) => {
   const p = products[i % 3]
-  return { id: r[0], orderId: r[1], sku: p.sku, product: p.name, received: new Date(Date.now() - i * 864e5).toISOString(), state: r[2], identity: r[3], completeness: r[4], condition: r[5], disposition: r[6], confidence: r[7] }
+  return { id: '', return_number: r[0], orderId: r[1], sku: p.sku, product: p.name, received: new Date(Date.now() - i * 864e5).toISOString(), state: r[2], identity: r[3], completeness: r[4], condition: r[5], disposition: r[6], confidence: r[7] }
 })
 export const trend = Array.from({ length: 14 }, (_, i) => ({ day: `D-${13 - i}`, inspections: 18 + ((i * 7) % 15) }))
