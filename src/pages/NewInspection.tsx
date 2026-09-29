@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Trash2, UploadCloud, Check, ChevronDown, Loader2 } from 'lucide-react'
-import { getConditionDefinitions, getProducts, inspectReturn, submitInspection } from '../services/api'
+import { createReturn, getConditionDefinitions, getDemoInspectionResult, getProducts, runAIInspection, saveEvidence, saveInspection, submitInspection, uploadReturnImage } from '../services/api'
 import { scenarios } from '../data/mock'
 import type { ConditionDefinition, Evidence, InspectionResult, Product, ScenarioKey } from '../types'
 import { Card, ConfidenceBadge, StatusBadge, pct } from '../components/ui'
@@ -18,35 +18,58 @@ export default function NewInspection() {
   const [step, setStep] = useState(0); const [products, setProducts] = useState<Product[]>([]); const [defs, setDefs] = useState<ConditionDefinition[]>([])
   const [sel, setSel] = useState(''); const [ret, setRet] = useState('RET-2001'); const [order, setOrder] = useState('ORD-9001')
   const [imgs, setImgs] = useState<Img[]>([]); const [err, setErr] = useState(''); const [stage, setStage] = useState(0)
-  const [res, setRes] = useState<InspectionResult | null>(null)
+  const [res, setRes] = useState<InspectionResult | null>(null); const [inspectionId, setInspectionId] = useState(''); const [isDemo, setIsDemo] = useState(false)
   const [focus, setFocus] = useState<Evidence | null>(null); const [decision, setDecision] = useState(''); const [ovr, setOvr] = useState({ d: 'RESTOCK', r: '', n: '' })
   const [audit, setAudit] = useState(''); const input = useRef<HTMLInputElement>(null)
-  useEffect(() => { getProducts().then(setProducts); getConditionDefinitions().then(setDefs) }, [])
+  useEffect(() => {
+    getProducts().then(setProducts).catch(e => setErr(`Could not load product catalogue: ${(e as Error).message}`))
+    getConditionDefinitions().then(setDefs).catch(e => setErr(`Could not load condition definitions: ${(e as Error).message}`))
+  }, [])
   const product = products.find(p => p.sku === sel)
   const add = (files: FileList | null) => {
     if (!files) return; const list = Array.from(files); const bad = list.filter(f => !['image/jpeg', 'image/png', 'image/webp'].includes(f.type))
     setErr(bad.length ? `${bad.map(f => f.name).join(', ')} is not supported. Upload JPG, PNG or WEBP files.` : '')
     setImgs(p => [...p, ...list.filter(f => !bad.includes(f)).map((f, k) => ({ id: `image-${p.length + k + 1}`, file: f, url: URL.createObjectURL(f), cat: 'Front' }))])
   }
-  const run = async (s: ScenarioKey = 'missing') => {
-    setStep(2); setRes(null); setErr(''); setStage(0); setDecision('')
+  const run = async (scenario?: ScenarioKey) => {
+    const demoMode = scenario !== undefined
+    setStep(2); setRes(null); setErr(''); setStage(0); setDecision(''); setInspectionId(''); setIsDemo(demoMode)
     const t = setInterval(() => setStage(x => Math.min(x + 1, stages.length - 1)), 400)
-    try { setRes(await inspectReturn(ret, imgs.map(i => i.file), s)); setStep(3) } catch (e) { setErr('Inspection failed: ' + (e as Error).message + '. Try again.'); setStep(1) } finally { clearInterval(t) }
+    try {
+      if (demoMode) {
+        setRes(getDemoInspectionResult(scenario))
+      } else {
+        await createReturn({ id: ret, orderId: order, sku: sel })
+        const uploaded = await Promise.all(imgs.map(async image => ({ ...(await uploadReturnImage(ret, image.file, image.cat)), localId: image.id })))
+        const result = await runAIInspection(ret, uploaded)
+        if (result.condition.label !== 'UNCERTAIN' && !defs.some(definition => definition.label === result.condition.label)) {
+          throw new Error(defs.length ? `Condition label "${result.condition.label}" is not in Supabase condition_definitions.` : 'No condition definitions exist in Supabase, so a real condition result cannot be validated.')
+        }
+        const savedInspectionId = await saveInspection(ret, result)
+        await saveEvidence(savedInspectionId, result, uploaded)
+        setInspectionId(savedInspectionId)
+        setRes(result)
+      }
+      setStep(3)
+    } catch (e) { setErr('Inspection failed: ' + (e as Error).message + '. Try again.'); setStep(1) } finally { clearInterval(t) }
   }
   const demo = (k: ScenarioKey) => { if (products[0]) setSel(products[0].sku); setRet('RET-DEMO'); setOrder('ORD-DEMO'); run(k) }
   const decide = async (a: 'APPROVE' | 'OVERRIDE' | 'MANUAL_REVIEW') => {
     if (a === 'OVERRIDE' && !ovr.r.trim()) { setErr('Enter a reason to override the recommendation.'); return }
+    if (isDemo) { setErr('DEMO/MOCK result only. Operator reviews are not saved.'); return }
     try {
-      const r = await submitInspection({ returnId: ret, sku: sel, result: res ?? undefined, action: a, disposition: a === 'OVERRIDE' ? ovr.d : res?.disposition.recommendation, reason: ovr.r, notes: ovr.n })
+      if (!inspectionId) throw new Error('No saved inspection is available to review.')
+      const r = await submitInspection({ returnId: ret, inspectionId, action: a, disposition: a === 'OVERRIDE' ? ovr.d : res?.disposition.recommendation, reason: ovr.r, notes: ovr.n })
       setErr(''); setDecision(a); setAudit(`${r.operator}, ${new Date(r.reviewedAt).toLocaleString()}`)
     } catch (e) { setErr((e as Error).message) }
   }
   const lowConf = res && Math.min(res.identity.confidence, res.completeness.confidence, res.condition.confidence, res.disposition.confidence) < 0.6
-  const validCond = res && (res.condition.label === 'UNCERTAIN' || defs.length === 0 || defs.some(d => d.label === res.condition.label))
+  const validCond = res && (isDemo || res.condition.label === 'UNCERTAIN' || defs.some(d => d.label === res.condition.label))
   return <div className="mx-auto max-w-5xl space-y-4"><div className="flex flex-wrap items-center justify-between gap-2"><h1 className="text-xl font-semibold">New inspection</h1>
     <label className="text-sm">Demo mode <select aria-label="Load example inspection" value="" onChange={e => e.target.value && demo(e.target.value as ScenarioKey)} className="ml-1 rounded border border-line bg-white px-2 py-1"><option value="">Load example inspection</option>{(Object.keys(scenarios) as ScenarioKey[]).map(k => <option key={k} value={k}>{scenarios[k].label}</option>)}</select></label></div>
     <ol className="flex flex-wrap gap-2 text-sm">{steps.map((s, i) => <li key={s} className={`flex items-center gap-1 rounded border px-3 py-1 ${i === step ? 'border-accent bg-accent text-white' : i < step ? 'border-accent text-accent' : 'border-line bg-white text-slate-500'}`}>{i < step && <Check size={14} />}{i + 1}. {s}</li>)}</ol>
     {err && <div role="alert" className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">{err}</div>}
+    {defs.length === 0 && <div role="status" className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">No condition definitions are available from Supabase. Add official definitions before recording a real condition assessment.</div>}
     {step === 0 && <Card title="Return information"><div className="grid gap-3 sm:grid-cols-2">
       <label className="text-sm">Return ID<input value={ret} onChange={e => setRet(e.target.value)} className="mt-1 w-full rounded border border-line px-3 py-2" /></label>
       <label className="text-sm">Order ID<input value={order} onChange={e => setOrder(e.target.value)} className="mt-1 w-full rounded border border-line px-3 py-2" /></label>
@@ -65,7 +88,7 @@ export default function NewInspection() {
         <button onClick={() => imgs.length ? run() : setErr('No images uploaded. Add at least one photograph to run the inspection.')} className="rounded bg-accent px-4 py-2 text-sm text-white">Run AI inspection</button></div></Card>}
     {step === 2 && <Card title="Analyzing returned item..."><ul className="space-y-2 text-sm">{stages.map((s, i) => <li key={s} className="flex items-center gap-2">{i < stage ? <Check size={16} className="text-green-700" /> : i === stage ? <Loader2 size={16} className="animate-spin" /> : <span className="w-4 text-center">○</span>}{s}</li>)}</ul></Card>}
     {step === 3 && res && <>
-      <div className="rounded border border-line bg-white p-3 text-sm">This is an AI recommendation. It is not accepted until an operator reviews it. Generated {new Date(res.timestamp).toLocaleString()}.</div>
+      <div className="rounded border border-line bg-white p-3 text-sm">{isDemo ? 'DEMO/MOCK result. This example is not saved to inspection records.' : 'This is an AI recommendation. It is not accepted until an operator reviews it.'} Generated {new Date(res.timestamp).toLocaleString()}.</div>
       {lowConf && <div role="alert" className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">Human review recommended. One or more findings have low confidence.</div>}
       {!validCond && <div role="alert" className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">Condition label "{res.condition.label}" is not in the configured definitions.</div>}
       <div className="grid gap-4 md:grid-cols-2">

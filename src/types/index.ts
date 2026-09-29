@@ -11,6 +11,13 @@ export interface InspectionResult {
   disposition: { recommendation: Disposition; confidence: number; reason: string }
   timestamp: string
 }
-export interface ReturnRecord { id: string; orderId: string; sku: string; product: string; received: string; state: ReturnState;
-  identity: Status; completeness: Status; condition: string; disposition: Disposition; confidence: number }
+export interface ReturnRecord {
+  id: string; orderId: string; sku: string; product: string; received: string; state: ReturnState;
+  identity: Status; completeness: Status; condition: string; disposition: Disposition; confidence: number
+}
+export interface ReturnImage { id: string; returnId: string; imageUrl: string; imageCategory: string; fileName: string }
+export interface ReturnDetail extends ReturnRecord {
+  images: (ReturnImage & { signedUrl: string })[]
+  inspection: (Record<string, unknown> & { missingComponents: Record<string, unknown>[]; evidence: Record<string, unknown>[] }) | null
+}
 export type ScenarioKey = 'correct' | 'wrong' | 'missing' | 'damaged' | 'uncertain'
